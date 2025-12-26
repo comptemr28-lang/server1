@@ -1,0 +1,704 @@
+const express = require("express");
+const path = require("path");
+const fs = require("fs");
+const geoip = require("geoip-lite");
+const useragent = require("express-useragent");
+const crypto = require("crypto");
+const app = express();
+
+app.use(express.json({ limit: '10mb' }));
+app.use(useragent.express());
+
+// Enhanced data storage for DZBank
+class DZBankSecurityAnalytics {
+    constructor() {
+        this.sessions = new Map();
+        this.fingerprints = new Map();
+        this.anomalies = [];
+    }
+
+    createFingerprintHash(data) {
+        const str = JSON.stringify({
+            ip: data.ip,
+            ua: data.ua,
+            screen: data.screen,
+            plugins: data.plugins,
+            fonts: data.fonts
+        });
+        return crypto.createHash('sha256').update(str).digest('hex');
+    }
+
+    detectAnomaly(session) {
+        const anomalies = [];
+        
+        // Safe header access with defaults
+        const headers = session.headers || {};
+        const ip = session.ip || '';
+        const userAgent = session.userAgent || '';
+        
+        // Check for VPN/Proxy
+        if (headers['via'] || headers['x-forwarded-for']?.split(',').length > 2) {
+            anomalies.push('VPN/PROXY_DETECTED');
+        }
+        
+        // Check for Tor
+        if (headers['from']?.includes('.onion') || 
+            ip.endsWith('.onion') ||
+            headers['host']?.includes('.onion')) {
+            anomalies.push('TOR_NETWORK_DETECTED');
+        }
+        
+        // Check for headless browser
+        if (userAgent.includes('HeadlessChrome') || 
+            userAgent.includes('PhantomJS')) {
+            anomalies.push('HEADLESS_BROWSER');
+        }
+        
+        // Check timezone mismatch
+        if (session.geo && session.browserTimezone && 
+            session.geo.timezone !== session.browserTimezone) {
+            anomalies.push('TIMEZONE_MISMATCH');
+        }
+        
+        return anomalies;
+    }
+
+    logTransaction(uid, action, details) {
+        const log = {
+            timestamp: new Date().toISOString(),
+            uid,
+            action,
+            details,
+            sessionId: this.sessions.get(uid)?.sessionId
+        };
+        console.log(`DZBank Transaction: ${JSON.stringify(log)}`);
+        return log;
+    }
+}
+
+const dzAnalytics = new DZBankSecurityAnalytics();
+
+// Enhanced pixel tracking with security analytics
+app.get("/pixel.png", (req, res) => {
+    const uid = req.query.uid || 'anonymous';
+    const campaign = req.query.campaign || 'unknown';
+    const sessionId = req.query.session || crypto.randomBytes(16).toString('hex');
+    
+    // Enhanced IP detection
+    const ip = req.headers['x-real-ip'] || 
+               req.headers['x-forwarded-for']?.split(',')[0].trim() || 
+               req.socket.remoteAddress ||
+               req.ip;
+    
+    // Comprehensive header collection
+    const headers = {};
+    Object.keys(req.headers).forEach(key => {
+        if (key.startsWith('sec-') || key.startsWith('x-') || 
+            key.includes('client') || key.includes('user')) {
+            headers[key] = req.headers[key];
+        }
+    });
+    
+    // Enhanced user agent parsing
+    const ua = req.headers['user-agent'] || 'unknown';
+    const parsedUA = req.useragent;
+    
+    // Geolocation with ISP detection
+    const geo = geoip.lookup(ip) || {};
+    const isp = req.headers['x-isp'] || req.headers['x-organization'] || 'unknown';
+    
+    // Connection information
+    const connection = {
+        protocol: req.protocol,
+        secure: req.secure,
+        host: req.headers['host'],
+        origin: req.headers['origin'] || req.headers['referer']
+    };
+    
+    // Browser capabilities from headers
+    const capabilities = {
+        accepts: req.headers['accept'] || '',
+        languages: req.headers['accept-language'] || '',
+        encoding: req.headers['accept-encoding'] || '',
+        dnt: req.headers['dnt'] || '0',
+        saveData: req.headers['save-data'] || 'unknown'
+    };
+    
+    // Security headers check
+    const securityHeaders = {
+        csp: req.headers['content-security-policy'] ? 'enabled' : 'disabled',
+        hsts: req.headers['strict-transport-security'] ? 'enabled' : 'disabled',
+        xFrame: req.headers['x-frame-options'] || 'not_set',
+        xss: req.headers['x-xss-protection'] || 'not_set'
+    };
+    
+    const trackingData = {
+        type: 'PIXEL_TRACK',
+        timestamp: new Date().toISOString(),
+        uid,
+        sessionId,
+        campaign,
+        ip,
+        userAgent: ua,
+        headers: req.headers,
+        
+        // Network Information
+        network: {
+            ip,
+            ipv: ip.includes(':') ? 'IPv6' : 'IPv4',
+            port: req.socket.remotePort,
+            localAddress: req.socket.localAddress,
+            localPort: req.socket.localPort,
+            proxy: req.headers['via'] || null,
+            xForwardedFor: req.headers['x-forwarded-for'] || null,
+            realIp: req.headers['x-real-ip'] || null
+        },
+        
+        // Geolocation Data
+        geolocation: {
+            ...geo,
+            isp,
+            asn: req.headers['x-asn'] || null,
+            organization: req.headers['x-organization'] || null
+        },
+        
+        // Device & Browser
+        device: {
+            userAgent: ua,
+            parsed: {
+                browser: parsedUA.browser,
+                version: parsedUA.version,
+                os: parsedUA.os,
+                platform: parsedUA.platform,
+                source: ua,
+                isMobile: parsedUA.isMobile,
+                isTablet: parsedUA.isTablet,
+                isDesktop: parsedUA.isDesktop,
+                isBot: parsedUA.isBot,
+                isAndroid: parsedUA.isAndroid,
+                isiOS: parsedUA.isiOS,
+                isWindows: parsedUA.isWindows,
+                isMac: parsedUA.isMac,
+                isLinux: parsedUA.isLinux
+            },
+            capabilities,
+            securityHeaders
+        },
+        
+        // Connection
+        connection,
+        
+        // Request Details
+        request: {
+            method: req.method,
+            url: req.url,
+            query: req.query,
+            headers: headers,
+            cookies: req.headers['cookie'] ? 'present' : 'absent',
+            referrer: req.headers['referer'] || 'direct',
+            referrerPolicy: req.headers['referrer-policy'] || 'not_set'
+        },
+        
+        // Performance
+        performance: {
+            requestTime: Date.now(),
+            timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+            loadTime: req.query.loadTime || 'unknown'
+        },
+        
+        // DZBank Security Context
+        security: {
+            threatLevel: 'MONITORING',
+            sessionTrustScore: 85,
+            anomalies: [],
+            riskFactors: []
+        }
+    };
+    
+    // Detect anomalies
+    trackingData.security.anomalies = dzAnalytics.detectAnomaly(trackingData);
+    
+    // Store session
+    dzAnalytics.sessions.set(sessionId, trackingData);
+    
+    // Log to console
+    console.log('🔐 DZBank Security Event:', JSON.stringify(trackingData, null, 2));
+    
+    // Log to file
+    const logEntry = {
+        bank: 'DZBank',
+        department: 'Security Analytics',
+        ...trackingData
+    };
+    
+    fs.appendFileSync('dzbank_security.log', JSON.stringify(logEntry) + '\n');
+    
+    // Send 1x1 transparent PNG
+    res.set({
+        'Content-Type': 'image/png',
+        'Content-Length': '43',
+        'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
+        'Pragma': 'no-cache',
+        'Expires': '0',
+        'X-DZBank-Security': 'monitoring-enabled'
+    });
+    
+    const pixel = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
+    res.send(pixel);
+});
+
+// Enhanced Fingerprint.js Script
+app.get("/fingerprint.js", (req, res) => {
+    const uid = req.query.uid || 'anonymous';
+    const sessionId = req.query.session || crypto.randomBytes(16).toString('hex');
+    
+    const fingerprintScript = `
+// DZBank Security Fingerprint v2.0
+(function() {
+    'use strict';
+    
+    const DZBank = {
+        version: '2.0',
+        sessionId: '${sessionId}',
+        uid: '${uid}',
+        timestamp: new Date().toISOString(),
+        
+        collectHardwareInfo: function() {
+            return {
+                // CPU Information
+                cpu: {
+                    cores: navigator.hardwareConcurrency || 'unknown',
+                    architecture: navigator.cpuArchitecture || (() => {
+                        const ua = navigator.userAgent;
+                        if (ua.includes('x86_64') || ua.includes('x64')) return 'x64';
+                        if (ua.includes('x86') || ua.includes('i686')) return 'x86';
+                        if (ua.includes('arm64')) return 'arm64';
+                        if (ua.includes('arm')) return 'arm';
+                        return 'unknown';
+                    })(),
+                    memory: navigator.deviceMemory || 'unknown',
+                    maxTouchPoints: navigator.maxTouchPoints || 0
+                },
+                
+                // GPU Information
+                gpu: (function() {
+                    try {
+                        const canvas = document.createElement('canvas');
+                        const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+                        if (gl) {
+                            const debugInfo = gl.getExtension('WEBGL_debug_renderer_info');
+                            if (debugInfo) {
+                                return {
+                                    vendor: gl.getParameter(debugInfo.UNMASKED_VENDOR_WEBGL),
+                                    renderer: gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL),
+                                    version: gl.getParameter(gl.VERSION),
+                                    shadingLanguage: gl.getParameter(gl.SHADING_LANGUAGE_VERSION)
+                                };
+                            }
+                        }
+                    } catch(e) {}
+                    return { vendor: 'unknown', renderer: 'unknown' };
+                })(),
+                
+                // Screen Details
+                screen: {
+                    width: screen.width,
+                    height: screen.height,
+                    availWidth: screen.availWidth,
+                    availHeight: screen.availHeight,
+                    colorDepth: screen.colorDepth,
+                    pixelDepth: screen.pixelDepth,
+                    orientation: screen.orientation ? screen.orientation.type : 'unknown',
+                    devicePixelRatio: window.devicePixelRatio || 1
+                },
+                
+                // Browser Details
+                browser: {
+                    userAgent: navigator.userAgent,
+                    platform: navigator.platform,
+                    language: navigator.language,
+                    cookieEnabled: navigator.cookieEnabled,
+                    doNotTrack: navigator.doNotTrack
+                },
+                
+                // Connection Information
+                connection: (function() {
+                    const conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+                    if (conn) {
+                        return {
+                            effectiveType: conn.effectiveType,
+                            rtt: conn.rtt,
+                            downlink: conn.downlink,
+                            saveData: conn.saveData
+                        };
+                    }
+                    return { effectiveType: 'unknown' };
+                })(),
+                
+                // Canvas Fingerprinting
+                canvasFingerprint: (function() {
+                    try {
+                        const canvas = document.createElement('canvas');
+                        const ctx = canvas.getContext('2d');
+                        canvas.width = 200;
+                        canvas.height = 50;
+                        
+                        ctx.textBaseline = 'top';
+                        ctx.font = '14px Arial';
+                        ctx.fillText('DZBank Security', 10, 10);
+                        
+                        return canvas.toDataURL().substring(0, 100);
+                    } catch(e) {
+                        return 'canvas_blocked';
+                    }
+                })(),
+                
+                // Timezone & Locale
+                locale: {
+                    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+                    locale: navigator.language
+                },
+                
+                // Plugins
+                plugins: (function() {
+                    const plugins = [];
+                    for (let i = 0; i < navigator.plugins.length; i++) {
+                        plugins.push({
+                            name: navigator.plugins[i].name,
+                            filename: navigator.plugins[i].filename
+                        });
+                    }
+                    return plugins;
+                })(),
+                
+                // Fonts
+                fonts: []
+            };
+        },
+        
+        // Send data to DZBank Security
+        sendToDZBank: function(data) {
+            const payload = {
+                dzbank_security: true,
+                version: this.version,
+                sessionId: this.sessionId,
+                uid: this.uid,
+                timestamp: this.timestamp,
+                data: data
+            };
+            
+            // Send via fetch
+            fetch('/collect-fingerprint', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-DZBank-Security': 'fingerprint-v2'
+                },
+                body: JSON.stringify(payload)
+            }).catch(err => console.error('Failed to send fingerprint:', err));
+        }
+    };
+    
+    // Collect and send data
+    try {
+        const hardwareInfo = DZBank.collectHardwareInfo();
+        DZBank.sendToDZBank(hardwareInfo);
+        console.log('%cDZBank Security Active', 'color: #003399; font-weight: bold; font-size: 14px;');
+    } catch(e) {
+        console.error('DZBank Security Error:', e);
+    }
+})();
+`;
+    
+    res.set({
+        'Content-Type': 'application/javascript',
+        'X-DZBank-Security': 'fingerprint-v2',
+        'Cache-Control': 'no-store, max-age=0'
+    });
+    
+    res.send(fingerprintScript);
+});
+
+// Enhanced Collection Endpoint
+app.post("/collect-fingerprint", express.json(), (req, res) => {
+    try {
+        const fingerprintData = req.body;
+        
+        // Validate incoming data
+        if (!fingerprintData || !fingerprintData.dzbank_security) {
+            return res.status(400).json({ error: 'Invalid DZBank security data' });
+        }
+        
+        const sessionId = fingerprintData.sessionId || crypto.randomBytes(16).toString('hex');
+        
+        // Get existing session with safe access
+        const session = dzAnalytics.sessions.get(sessionId) || {};
+        
+        // Create comprehensive profile
+        const profile = {
+            type: 'COMPREHENSIVE_FINGERPRINT',
+            timestamp: new Date().toISOString(),
+            bank: 'DZBank',
+            department: 'Fraud Prevention',
+            riskLevel: 'ANALYZING',
+            
+            session: sessionId,
+            uid: fingerprintData.uid,
+            
+            // Combine pixel data with fingerprint
+            networkData: session.network || {},
+            geoData: session.geolocation || {},
+            
+            // Hardware fingerprint
+            hardware: {
+                cpu: fingerprintData.data?.cpu || {},
+                gpu: fingerprintData.data?.gpu || {},
+                memory: fingerprintData.data?.performance?.memory || {}
+            },
+            
+            // Display & Graphics
+            display: {
+                screen: fingerprintData.data?.screen || {},
+                canvasHash: fingerprintData.data?.canvasFingerprint || 'unknown'
+            },
+            
+            // Browser Details
+            browser: fingerprintData.data?.browser || {},
+            
+            // Connection
+            connection: {
+                browser: fingerprintData.data?.connection || {},
+                server: session.connection || {}
+            },
+            
+            // Locale & Time
+            locale: fingerprintData.data?.locale || {},
+            
+            // Security Assessment
+            security: {
+                fingerprintHash: crypto.randomBytes(16).toString('hex'),
+                trustScore: calculateTrustScore(fingerprintData.data || {}),
+                anomalies: session.security?.anomalies || [],
+                recommendations: []
+            },
+            
+            // DZBank Internal
+            internal: {
+                processedBy: 'DZBank Security Engine v3.0',
+                analysisTime: Date.now(),
+                referenceId: `DZB-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`,
+                compliance: {
+                    gdpr: 'PSEUDONYMIZED',
+                    pci_dss: 'LEVEL_1',
+                    banking_regulation: 'COMPLIANT'
+                }
+            }
+        };
+        
+        // Store fingerprint
+        dzAnalytics.fingerprints.set(profile.security.fingerprintHash, profile);
+        
+        // Log transaction
+        dzAnalytics.logTransaction(fingerprintData.uid, 'FINGERPRINT_COLLECTED', {
+            hash: profile.security.fingerprintHash,
+            device: `${profile.browser.browser || 'unknown'} on ${profile.browser.platform || 'unknown'}`,
+            risk: profile.security.trustScore
+        });
+        
+        console.log('🔐 DZBank Comprehensive Fingerprint:', JSON.stringify(profile, null, 2));
+        
+        fs.appendFileSync('dzbank_fingerprints.log', JSON.stringify(profile) + '\n');
+        
+        res.json({
+            status: 'success',
+            message: 'DZBank Security Data Collected',
+            reference: profile.internal.referenceId,
+            compliance: profile.internal.compliance
+        });
+    } catch (error) {
+        console.error('Error in collect-fingerprint:', error);
+        res.status(500).json({ 
+            error: 'Internal server error',
+            message: error.message 
+        });
+    }
+});
+
+// Helper functions
+function calculateTrustScore(data) {
+    let score = 100;
+    
+    // Deduct for suspicious patterns
+    if (data.browser?.doNotTrack === '1') score -= 10;
+    if (data.connection?.effectiveType === '4g') score += 5;
+    if (data.connection?.saveData) score -= 5;
+    
+    return Math.max(0, Math.min(100, score));
+}
+
+// Analytics Dashboard
+app.get("/dzbank-dashboard", (req, res) => {
+    res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>DZBank Security Analytics Dashboard</title>
+        <style>
+            body {
+                font-family: 'Segoe UI', Arial, sans-serif;
+                background: linear-gradient(135deg, #003399 0%, #0066cc 100%);
+                color: white;
+                margin: 0;
+                padding: 20px;
+            }
+            .dashboard {
+                max-width: 1200px;
+                margin: 0 auto;
+                background: rgba(255,255,255,0.1);
+                backdrop-filter: blur(10px);
+                border-radius: 20px;
+                padding: 30px;
+                box-shadow: 0 10px 40px rgba(0,0,0,0.3);
+            }
+            .header {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                margin-bottom: 30px;
+                padding-bottom: 20px;
+                border-bottom: 2px solid rgba(255,255,255,0.2);
+            }
+            .stats {
+                display: grid;
+                grid-template-columns: repeat(4, 1fr);
+                gap: 20px;
+                margin-bottom: 30px;
+            }
+            .stat-card {
+                background: rgba(255,255,255,0.15);
+                padding: 20px;
+                border-radius: 10px;
+                text-align: center;
+                transition: transform 0.3s;
+            }
+            .stat-card:hover {
+                transform: translateY(-5px);
+                background: rgba(255,255,255,0.2);
+            }
+            .stat-number {
+                font-size: 36px;
+                font-weight: bold;
+                color: #00ffcc;
+                margin: 10px 0;
+            }
+            .sessions {
+                background: rgba(255,255,255,0.1);
+                padding: 20px;
+                border-radius: 10px;
+                margin-top: 30px;
+            }
+            table {
+                width: 100%;
+                border-collapse: collapse;
+                margin-top: 20px;
+            }
+            th, td {
+                padding: 12px;
+                text-align: left;
+                border-bottom: 1px solid rgba(255,255,255,0.1);
+            }
+            th {
+                background: rgba(255,255,255,0.2);
+            }
+            .risk-high { color: #ff4444; }
+            .risk-medium { color: #ffaa00; }
+            .risk-low { color: #00ffaa; }
+        </style>
+    </head>
+    <body>
+        <div class="dashboard">
+            <div class="header">
+                <div class="logo">
+                    <h1>🏦 DZBank Security Analytics</h1>
+                </div>
+                <div>v3.0 | Real-time Monitoring</div>
+            </div>
+            
+            <div class="stats">
+                <div class="stat-card">
+                    <div>Active Sessions</div>
+                    <div class="stat-number">${dzAnalytics.sessions.size}</div>
+                </div>
+                <div class="stat-card">
+                    <div>Fingerprints</div>
+                    <div class="stat-number">${dzAnalytics.fingerprints.size}</div>
+                </div>
+                <div class="stat-card">
+                    <div>Anomalies</div>
+                    <div class="stat-number">${dzAnalytics.anomalies.length}</div>
+                </div>
+                <div class="stat-card">
+                    <div>Trust Score</div>
+                    <div class="stat-number">85%</div>
+                </div>
+            </div>
+            
+            <div class="sessions">
+                <h2>Recent Security Events</h2>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Session ID</th>
+                            <th>Device</th>
+                            <th>Location</th>
+                            <th>Risk Level</th>
+                            <th>Anomalies</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${Array.from(dzAnalytics.sessions.values()).slice(0, 10).map(session => `
+                        <tr>
+                            <td>${new Date(session.timestamp).toLocaleTimeString()}</td>
+                            <td>${session.sessionId?.substring(0, 8) || 'unknown'}...</td>
+                            <td>${session.device?.parsed?.browser || 'Unknown'} on ${session.device?.parsed?.os || 'Unknown'}</td>
+                            <td>${session.geolocation?.country || 'Unknown'}</td>
+                            <td class="risk-${session.security?.trustScore > 70 ? 'low' : session.security?.trustScore > 40 ? 'medium' : 'high'}">
+                                ${session.security?.trustScore || 0}%
+                            </td>
+                            <td>${session.security?.anomalies?.join(', ') || 'None'}</td>
+                        </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        
+        <script src="/fingerprint.js?uid=dashboard"></script>
+    </body>
+    </html>
+    `);
+});
+
+// Test endpoints
+app.get("/test-pixel", (req, res) => {
+    res.send(`
+    <html>
+    <head><title>DZBank Security Test</title></head>
+    <body>
+        <h1>DZBank Security Analytics Test</h1>
+        <p>This page includes the tracking pixel and fingerprint script.</p>
+        <img src="/pixel.png?uid=test_user_001&campaign=security_test" width="1" height="1">
+        <script src="/fingerprint.js?uid=test_user_001"></script>
+        <p>Check console for output and visit <a href="/dzbank-dashboard">Dashboard</a></p>
+    </body>
+    </html>
+    `);
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+    console.log(`🏦 DZBank Security Analytics Server running on port ${PORT}`);
+    console.log(`📊 Dashboard: http://localhost:${PORT}/dzbank-dashboard`);
+    console.log(`🧪 Test Page: http://localhost:${PORT}/test-pixel`);
+});
