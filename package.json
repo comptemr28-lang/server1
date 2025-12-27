@@ -10,8 +10,10 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
+    "better-sqlite3": "^12.5.0",
     "express": "^5.2.1",
     "express-useragent": "^2.0.2",
-    "geoip-lite": "^1.4.10"
+    "geoip-lite": "^1.4.10",
+    "public-ip": "^8.0.0"
   }
 }
