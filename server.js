@@ -1953,6 +1953,11 @@ saveFingerprint(hash, data) {
 
 const dzAnalytics = new DZBankSecurityAnalytics();
 
+app.get("/health", (req, res) => {
+    res.status(200).send("OK");
+});
+
+
 // Enhanced pixel tracking with security analytics
 app.get("/pixel.png", (req, res) => {
     const uid = req.query.uid || 'anonymous';
@@ -3115,4 +3120,5 @@ app.listen(PORT, () => {
     console.log(`📊 Dashboard: http://localhost:${PORT}/dzbank-dashboard`);
     console.log(`🧪 Test Page: http://localhost:${PORT}/test-pixel`);
 });
+
 
